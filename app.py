@@ -142,7 +142,7 @@ def load_data(asset="nvidia", period="5y"):
         )
 
     try:
-        raw = pd.read_csv(file_path)
+        raw = pd.read_csv(file_path, low_memory=False)
     except Exception as exc:
         raise ValueError(
             f"Could not read {file_name}: {exc}"
@@ -1262,60 +1262,117 @@ def run_backtest():
 def correlation():
 
     try:
-
-        period = request.args.get(
-            "period",
-            "5y"
-        )
+        period = request.args.get("period", "5y")
 
         if period not in PERIOD_DAYS:
-            return error_response(
-                "Invalid period."
-            )
+            return error_response("Invalid period.")
 
         series = {}
 
         for key, info in ASSETS.items():
 
-            data = load_data(
-                key,
-                period
-            )
+            data = load_data(key, period)
 
+            # Make sure dates are normalized
+            data = data.copy()
+            data.index = pd.to_datetime(data.index).normalize()
+
+            # Remove duplicate dates
+            data = data[~data.index.duplicated(keep="last")]
+
+            # Calculate daily returns
             returns = (
                 data["Close"]
                 .pct_change()
-                .rename(info["name"])
+                .replace([np.inf, -np.inf], np.nan)
+                .dropna()
             )
 
+            returns.name = info["name"]
             series[info["name"]] = returns
 
+        # Use outer join first
         returns_df = pd.concat(
             series.values(),
             axis=1,
-            join="inner"
+            join="outer"
         )
 
-        returns_df = returns_df.dropna()
+        # Sort dates
+        returns_df = returns_df.sort_index()
 
-        if returns_df.empty:
+        # Only keep dates where all 3 assets have data
+        returns_df = returns_df.dropna(
+            how="any"
+        )
+
+        if len(returns_df) < 2:
             return error_response(
-                "Not enough overlapping data to calculate correlation."
+                "Not enough overlapping trading dates between Gold, Bitcoin and NVIDIA."
             )
 
+        # Correlation matrix
         corr = returns_df.corr()
 
         matrix = {}
 
         for row in corr.index:
-
             matrix[row] = {}
 
             for col in corr.columns:
+                value = corr.loc[row, col]
 
-                matrix[row][col] = clean_number(
-                    corr.loc[row, col]
+                matrix[row][col] = clean_number(value)
+
+        # Bitcoin vs NVIDIA rolling correlation
+        rolling_data = []
+
+        if (
+            "Bitcoin" in returns_df.columns
+            and "NVIDIA" in returns_df.columns
+        ):
+
+            rolling = (
+                returns_df["Bitcoin"]
+                .rolling(
+                    window=60,
+                    min_periods=20
                 )
+                .corr(
+                    returns_df["NVIDIA"]
+                )
+                .dropna()
+                .tail(365)
+            )
+
+            for idx, value in rolling.items():
+
+                rolling_data.append({
+                    "date": idx.strftime("%Y-%m-%d"),
+                    "value": clean_number(value)
+                })
+
+        return jsonify({
+            "status": "ok",
+            "period": period,
+            "matrix": matrix,
+            "rolling_btc_nvidia": rolling_data,
+            "data_points": len(returns_df),
+        })
+
+    except FileNotFoundError as exc:
+
+        return error_response(
+            str(exc),
+            404
+        )
+
+    except Exception as exc:
+
+        return error_response(
+            f"Correlation calculation failed: {exc}",
+            500
+        )
 
         # ----------------------------------------------------
         # Rolling correlation: Bitcoin vs NVIDIA
