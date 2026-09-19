@@ -1287,42 +1287,50 @@ def run_backtest():
             500
         )
 
-
 # ------------------------------------------------------------
 # Correlation API
 # ------------------------------------------------------------
-
 
 @app.route("/api/correlation")
 def correlation():
 
     try:
 
-        period = request.args.get(
-            "period",
-            "5y"
-        )
+        period = request.args.get("period", "5y")
 
         if period not in PERIOD_DAYS:
             return error_response(
                 "Invalid period."
             )
 
-        series = {}
+        returns_list = []
 
         for key, info in ASSETS.items():
 
+            # Load asset data
             data = load_data(
                 key,
                 period
             )
 
-            # Normalize all dates to YYYY-MM-DD
-            data = data.copy()
+            if data is None or data.empty:
+                return error_response(
+                    f"No data available for {info['name']}."
+                )
 
+            # Make independent copy
+            data = data.copy(deep=True)
+
+            # Normalize dates
             data.index = pd.to_datetime(
-                data.index
+                data.index,
+                errors="coerce"
             ).normalize()
+
+            # Remove invalid dates
+            data = data[
+                data.index.notna()
+            ]
 
             # Remove duplicate dates
             data = data[
@@ -1331,7 +1339,26 @@ def correlation():
                 )
             ]
 
-            # Calculate daily returns
+            # Sort by date
+            data = data.sort_index()
+
+            # Make sure Close is numeric
+            data.loc[:, "Close"] = pd.to_numeric(
+                data["Close"],
+                errors="coerce"
+            )
+
+            # Remove invalid prices
+            data = data.dropna(
+                subset=["Close"]
+            )
+
+            if len(data) < 2:
+                return error_response(
+                    f"Not enough price data for {info['name']}."
+                )
+
+            # Daily returns
             returns = (
                 data["Close"]
                 .pct_change()
@@ -1344,28 +1371,47 @@ def correlation():
 
             returns.name = info["name"]
 
-            series[info["name"]] = returns
+            returns_list.append(
+                returns
+            )
 
-        # Combine all assets
+        # ----------------------------------------------------
+        # Combine returns
+        # ----------------------------------------------------
+
         returns_df = pd.concat(
-            series.values(),
+            returns_list,
             axis=1,
-            join="outer"
+            join="inner"
         )
 
         returns_df = returns_df.sort_index()
 
-        # Keep only dates where all assets have returns
+        # Remove rows containing missing values
         returns_df = returns_df.dropna(
             how="any"
         )
 
-        if len(returns_df) < 2:
+        # ----------------------------------------------------
+        # Validate overlapping data
+        # ----------------------------------------------------
+
+        if returns_df.empty:
+
             return error_response(
-                "Not enough overlapping trading dates between Gold, Bitcoin and NVIDIA."
+                "No common dates found between Gold, Bitcoin and NVIDIA."
             )
 
+        if len(returns_df) < 2:
+
+            return error_response(
+                "Not enough overlapping dates to calculate correlation."
+            )
+
+        # ----------------------------------------------------
         # Correlation matrix
+        # ----------------------------------------------------
+
         corr = returns_df.corr()
 
         matrix = {}
@@ -1376,11 +1422,16 @@ def correlation():
 
             for col in corr.columns:
 
+                value = corr.loc[row, col]
+
                 matrix[row][col] = clean_number(
-                    corr.loc[row, col]
+                    value
                 )
 
+        # ----------------------------------------------------
         # Bitcoin vs NVIDIA rolling correlation
+        # ----------------------------------------------------
+
         rolling_data = []
 
         if (
@@ -1399,8 +1450,10 @@ def correlation():
                     returns_df["NVIDIA"]
                 )
                 .dropna()
-                .tail(365)
             )
+
+            # Keep latest 365 observations
+            rolling = rolling.tail(365)
 
             for idx, value in rolling.items():
 
@@ -1413,7 +1466,12 @@ def correlation():
                     "value": clean_number(
                         value
                     ),
+
                 })
+
+        # ----------------------------------------------------
+        # Response
+        # ----------------------------------------------------
 
         return jsonify({
 
@@ -1425,9 +1483,10 @@ def correlation():
 
             "rolling_btc_nvidia": rolling_data,
 
-            "data_points": len(
-                returns_df
+            "data_points": int(
+                len(returns_df)
             ),
+
         })
 
     except FileNotFoundError as exc:
@@ -1439,12 +1498,16 @@ def correlation():
 
     except Exception as exc:
 
+        # Print complete error to Render logs
+        print(
+            "CORRELATION ERROR:",
+            repr(exc)
+        )
+
         return error_response(
             f"Correlation calculation failed: {exc}",
             500
         )
-        
-
 # ------------------------------------------------------------
 # Market Regimes API
 # ------------------------------------------------------------
