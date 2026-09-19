@@ -142,11 +142,58 @@ def load_data(asset="nvidia", period="5y"):
         )
 
     try:
-        raw = pd.read_csv(file_path, low_memory=False)
-    except Exception as exc:
-        raise ValueError(
-            f"Could not read {file_name}: {exc}"
-        )
+    # First try normal CSV format
+    raw = pd.read_csv(
+        file_path,
+        low_memory=False
+    )
+
+    # NVIDIA Yahoo Finance CSV has a 2-row header:
+    # Price, Adj Close, Close, High, Low, Open, Volume
+    # Ticker, NVDA, NVDA, NVDA, NVDA, NVDA, NVDA
+    #
+    # If the first column is not a normal data column,
+    # try reading it as a multi-level header.
+
+    first_col = str(raw.columns[0]).strip().lower()
+
+    if first_col not in [
+        "date",
+        "datetime",
+        "timestamp",
+        "time",
+        "day"
+    ]:
+
+        try:
+            yahoo_raw = pd.read_csv(
+                file_path,
+                header=[0, 1],
+                index_col=0,
+                low_memory=False
+            )
+
+            if isinstance(
+                yahoo_raw.columns,
+                pd.MultiIndex
+            ):
+                yahoo_raw.columns = [
+                    str(col[0]).strip()
+                    for col in yahoo_raw.columns
+                ]
+
+            yahoo_raw.index.name = "Date"
+
+            raw = yahoo_raw.reset_index()
+
+        except Exception:
+            # Keep the normal CSV if Yahoo-style parsing fails
+            pass
+
+except Exception as exc:
+    raise ValueError(
+        f"Could not read {file_name}: {exc}"
+    )
 
     if raw.empty:
         raise ValueError(f"{file_name} is empty.")
