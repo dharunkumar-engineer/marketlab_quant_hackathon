@@ -1258,50 +1258,70 @@ def run_backtest():
 # Correlation API
 # ------------------------------------------------------------
 
-@app.route("/api/correlation")
+
+        @app.route("/api/correlation")
 def correlation():
 
     try:
-        period = request.args.get("period", "5y")
+
+        period = request.args.get(
+            "period",
+            "5y"
+        )
 
         if period not in PERIOD_DAYS:
-            return error_response("Invalid period.")
+            return error_response(
+                "Invalid period."
+            )
 
         series = {}
 
         for key, info in ASSETS.items():
 
-            data = load_data(key, period)
+            data = load_data(
+                key,
+                period
+            )
 
-            # Make sure dates are normalized
+            # Normalize all dates to YYYY-MM-DD
             data = data.copy()
-            data.index = pd.to_datetime(data.index).normalize()
+
+            data.index = pd.to_datetime(
+                data.index
+            ).normalize()
 
             # Remove duplicate dates
-            data = data[~data.index.duplicated(keep="last")]
+            data = data[
+                ~data.index.duplicated(
+                    keep="last"
+                )
+            ]
 
             # Calculate daily returns
             returns = (
                 data["Close"]
                 .pct_change()
-                .replace([np.inf, -np.inf], np.nan)
+                .replace(
+                    [np.inf, -np.inf],
+                    np.nan
+                )
                 .dropna()
             )
 
             returns.name = info["name"]
+
             series[info["name"]] = returns
 
-        # Use outer join first
+        # Combine all assets
         returns_df = pd.concat(
             series.values(),
             axis=1,
             join="outer"
         )
 
-        # Sort dates
         returns_df = returns_df.sort_index()
 
-        # Only keep dates where all 3 assets have data
+        # Keep only dates where all assets have returns
         returns_df = returns_df.dropna(
             how="any"
         )
@@ -1317,19 +1337,22 @@ def correlation():
         matrix = {}
 
         for row in corr.index:
+
             matrix[row] = {}
 
             for col in corr.columns:
-                value = corr.loc[row, col]
 
-                matrix[row][col] = clean_number(value)
+                matrix[row][col] = clean_number(
+                    corr.loc[row, col]
+                )
 
         # Bitcoin vs NVIDIA rolling correlation
         rolling_data = []
 
         if (
             "Bitcoin" in returns_df.columns
-            and "NVIDIA" in returns_df.columns
+            and
+            "NVIDIA" in returns_df.columns
         ):
 
             rolling = (
@@ -1348,57 +1371,7 @@ def correlation():
             for idx, value in rolling.items():
 
                 rolling_data.append({
-                    "date": idx.strftime("%Y-%m-%d"),
-                    "value": clean_number(value)
-                })
 
-        return jsonify({
-            "status": "ok",
-            "period": period,
-            "matrix": matrix,
-            "rolling_btc_nvidia": rolling_data,
-            "data_points": len(returns_df),
-        })
-
-    except FileNotFoundError as exc:
-
-        return error_response(
-            str(exc),
-            404
-        )
-
-    except Exception as exc:
-
-        return error_response(
-            f"Correlation calculation failed: {exc}",
-            500
-        )
-
-        # ----------------------------------------------------
-        # Rolling correlation: Bitcoin vs NVIDIA
-        # ----------------------------------------------------
-
-        rolling_data = []
-
-        if (
-            "Bitcoin" in returns_df.columns
-            and
-            "NVIDIA" in returns_df.columns
-        ):
-
-            rolling = (
-                returns_df["Bitcoin"]
-                .rolling(60)
-                .corr(
-                    returns_df["NVIDIA"]
-                )
-                .dropna()
-                .tail(365)
-            )
-
-            for idx, value in rolling.items():
-
-                rolling_data.append({
                     "date": idx.strftime(
                         "%Y-%m-%d"
                     ),
@@ -1433,10 +1406,10 @@ def correlation():
     except Exception as exc:
 
         return error_response(
-            str(exc),
+            f"Correlation calculation failed: {exc}",
             500
         )
-
+        
 
 # ------------------------------------------------------------
 # Market Regimes API
