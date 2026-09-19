@@ -1,151 +1,668 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
     <title>MarketLab — Quantitative Finance Dashboard</title>
+
+    <!-- Plotly -->
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+
+    <!-- Application Styles -->
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='style.css') }}"
+    >
 </head>
+
 <body>
+
 <div class="shell">
+
+    <!-- ======================================================
+         HEADER
+    ======================================================= -->
+
     <header class="topbar">
+
         <div>
-            <div class="brand">MarketLab</div>
-            <div class="subtitle">Quantitative Multi-Asset Research & Backtesting</div>
+            <div class="brand">
+                MarketLab
+            </div>
+
+            <div class="subtitle">
+                Quantitative Multi-Asset Research & Backtesting
+            </div>
         </div>
-        <div class="status"><span></span> Live market data</div>
+
+        <div class="status">
+            <span></span>
+            Local historical data
+        </div>
+
     </header>
 
+
+    <!-- ======================================================
+         MAIN CONTENT
+    ======================================================= -->
+
     <main>
+
+        <!-- ==================================================
+             HERO
+        =================================================== -->
+
         <section class="hero">
+
             <div>
-                <p class="eyebrow">FINANCIAL INTELLIGENCE</p>
-                <h1>Turn market history into<br><strong>testable decisions.</strong></h1>
-                <p class="hero-copy">Explore price behaviour, risk, correlations and strategy performance across Gold, Bitcoin and NVIDIA.</p>
+
+                <p class="eyebrow">
+                    FINANCIAL INTELLIGENCE
+                </p>
+
+                <h1>
+                    Turn market history into<br>
+                    <strong>testable decisions.</strong>
+                </h1>
+
+                <p class="hero-copy">
+                    Explore historical price behaviour, risk,
+                    correlations and strategy performance across
+                    Gold, Bitcoin and NVIDIA using local market datasets.
+                </p>
+
             </div>
+
         </section>
+
+
+        <!-- ==================================================
+             ANALYSIS CONTROLS
+        =================================================== -->
 
         <section class="controls card">
+
             <div class="control">
-                <label>Asset</label>
+
+                <label for="asset">
+                    Asset
+                </label>
+
                 <select id="asset">
+
                     {% for key, value in assets.items() %}
-                    <option value="{{ key }}">{{ value.name }}</option>
+
+                    <option value="{{ key }}">
+                        {{ value.name }}
+                    </option>
+
                     {% endfor %}
+
                 </select>
+
             </div>
+
+
             <div class="control">
-                <label>History</label>
+
+                <label for="period">
+                    History
+                </label>
+
                 <select id="period">
-                    <option value="1y">1 Year</option>
-                    <option value="3y">3 Years</option>
-                    <option value="5y" selected>5 Years</option>
-                    <option value="10y">10 Years</option>
+
+                    <option value="1y">
+                        1 Year
+                    </option>
+
+                    <option value="3y">
+                        3 Years
+                    </option>
+
+                    <option value="5y" selected>
+                        5 Years
+                    </option>
+
+                    <option value="10y">
+                        10 Years
+                    </option>
+
+                    <option value="max">
+                        Max
+                    </option>
+
                 </select>
+
             </div>
+
+
             <div class="control">
-                <label>Fast period</label>
-                <input id="fast" type="number" value="20" min="2" max="200">
+
+                <label for="fast">
+                    Fast period
+                </label>
+
+                <input
+                    id="fast"
+                    type="number"
+                    value="20"
+                    min="2"
+                    max="200"
+                >
+
             </div>
+
+
             <div class="control">
-                <label>Slow period</label>
-                <input id="slow" type="number" value="50" min="3" max="300">
+
+                <label for="slow">
+                    Slow period
+                </label>
+
+                <input
+                    id="slow"
+                    type="number"
+                    value="50"
+                    min="3"
+                    max="300"
+                >
+
             </div>
-            <button onclick="loadAnalysis()">Update</button>
+
+
+            <button
+                type="button"
+                onclick="loadAnalysis()"
+            >
+                Update
+            </button>
+
         </section>
+
+
+        <!-- ==================================================
+             SELECTED ASSET SUMMARY
+        =================================================== -->
 
         <section class="price-strip">
+
             <div>
-                <span class="muted">Selected asset</span>
-                <strong id="assetName">NVIDIA</strong>
+
+                <span class="muted">
+                    Selected asset
+                </span>
+
+                <strong id="assetName">
+                    NVIDIA
+                </strong>
+
             </div>
+
+
             <div>
-                <span class="muted">Latest price</span>
-                <strong id="lastPrice">—</strong>
+
+                <span class="muted">
+                    Latest price
+                </span>
+
+                <strong id="lastPrice">
+                    —
+                </strong>
+
             </div>
+
+
             <div>
-                <span class="muted">Data through</span>
-                <strong id="lastDate">—</strong>
+
+                <span class="muted">
+                    Data through
+                </span>
+
+                <strong id="lastDate">
+                    —
+                </strong>
+
             </div>
+
         </section>
+
+
+        <!-- ==================================================
+             PERFORMANCE METRICS
+        =================================================== -->
 
         <section class="metrics-grid">
-            <div class="metric card"><span>Total return</span><strong id="totalReturn">—</strong></div>
-            <div class="metric card"><span>Annualized return</span><strong id="annualReturn">—</strong></div>
-            <div class="metric card"><span>Volatility</span><strong id="volatility">—</strong></div>
-            <div class="metric card"><span>Sharpe ratio</span><strong id="sharpe">—</strong></div>
-            <div class="metric card"><span>Max drawdown</span><strong id="drawdown">—</strong></div>
+
+            <div class="metric card">
+
+                <span>
+                    Total return
+                </span>
+
+                <strong id="totalReturn">
+                    —
+                </strong>
+
+            </div>
+
+
+            <div class="metric card">
+
+                <span>
+                    Annualized return
+                </span>
+
+                <strong id="annualReturn">
+                    —
+                </strong>
+
+            </div>
+
+
+            <div class="metric card">
+
+                <span>
+                    Volatility
+                </span>
+
+                <strong id="volatility">
+                    —
+                </strong>
+
+            </div>
+
+
+            <div class="metric card">
+
+                <span>
+                    Sharpe ratio
+                </span>
+
+                <strong id="sharpe">
+                    —
+                </strong>
+
+            </div>
+
+
+            <div class="metric card">
+
+                <span>
+                    Max drawdown
+                </span>
+
+                <strong id="drawdown">
+                    —
+                </strong>
+
+            </div>
+
         </section>
+
+
+        <!-- ==================================================
+             ANALYSIS CHARTS
+        =================================================== -->
 
         <section class="chart-grid">
+
+
+            <!-- PRICE CHART -->
+
             <div class="card chart-card wide">
+
                 <div class="section-head">
-                    <div><h2>Price & moving averages</h2><p>Recent market behaviour</p></div>
+
+                    <div>
+
+                        <h2>
+                            Price & moving averages
+                        </h2>
+
+                        <p>
+                            Recent market behaviour
+                        </p>
+
+                    </div>
+
                 </div>
+
                 <div id="priceChart"></div>
+
             </div>
 
+
+            <!-- RETURNS -->
+
             <div class="card chart-card">
-                <div class="section-head"><div><h2>Returns</h2><p>Daily percentage change</p></div></div>
+
+                <div class="section-head">
+
+                    <div>
+
+                        <h2>
+                            Returns
+                        </h2>
+
+                        <p>
+                            Daily percentage change
+                        </p>
+
+                    </div>
+
+                </div>
+
                 <div id="returnChart"></div>
+
             </div>
 
+
+            <!-- DRAWDOWN -->
+
             <div class="card chart-card">
-                <div class="section-head"><div><h2>Drawdown</h2><p>Distance from previous peak</p></div></div>
+
+                <div class="section-head">
+
+                    <div>
+
+                        <h2>
+                            Drawdown
+                        </h2>
+
+                        <p>
+                            Distance from previous peak
+                        </p>
+
+                    </div>
+
+                </div>
+
                 <div id="drawdownChart"></div>
+
             </div>
+
         </section>
+
+
+        <!-- ==================================================
+             STRATEGY BACKTEST
+        =================================================== -->
 
         <section class="backtest card">
+
             <div class="section-head">
-                <div><h2>Strategy backtest</h2><p>Historical simulation with transaction costs</p></div>
-            </div>
-            <div class="backtest-controls">
-                <div class="control"><label>Strategy</label>
-                    <select id="strategy">
-                        {% for key, value in strategies.items() %}
-                        <option value="{{ key }}">{{ value }}</option>
-                        {% endfor %}
-                    </select>
+
+                <div>
+
+                    <h2>
+                        Strategy backtest
+                    </h2>
+
+                    <p>
+                        Historical simulation with transaction costs
+                    </p>
+
                 </div>
-                <div class="control"><label>Initial capital</label><input id="capital" type="number" value="100000"></div>
-                <div class="control"><label>Transaction cost</label><input id="cost" type="number" value="0.001" step="0.0001"></div>
-                <button onclick="runBacktest()">Run backtest</button>
+
             </div>
+
+
+            <!-- BACKTEST CONTROLS -->
+
+            <div class="backtest-controls">
+
+
+                <div class="control">
+
+                    <label for="strategy">
+                        Strategy
+                    </label>
+
+                    <select id="strategy">
+
+                        {% for key, value in strategies.items() %}
+
+                        <option value="{{ key }}">
+                            {{ value }}
+                        </option>
+
+                        {% endfor %}
+
+                    </select>
+
+                </div>
+
+
+                <div class="control">
+
+                    <label for="capital">
+                        Initial capital
+                    </label>
+
+                    <input
+                        id="capital"
+                        type="number"
+                        value="100000"
+                        min="1"
+                    >
+
+                </div>
+
+
+                <div class="control">
+
+                    <label for="cost">
+                        Transaction cost
+                    </label>
+
+                    <input
+                        id="cost"
+                        type="number"
+                        value="0.001"
+                        step="0.0001"
+                        min="0"
+                    >
+
+                </div>
+
+
+                <button
+                    type="button"
+                    onclick="runBacktest()"
+                >
+                    Run backtest
+                </button>
+
+            </div>
+
+
+            <!-- BACKTEST SUMMARY -->
 
             <div class="backtest-summary">
-                <div><span>Final portfolio</span><strong id="finalValue">—</strong></div>
-                <div><span>Strategy return</span><strong id="btReturn">—</strong></div>
-                <div><span>Benchmark return</span><strong id="benchmarkReturn">—</strong></div>
-                <div><span>Sharpe</span><strong id="btSharpe">—</strong></div>
-                <div><span>Max drawdown</span><strong id="btDrawdown">—</strong></div>
-                <div><span>Trades</span><strong id="trades">—</strong></div>
+
+
+                <div>
+
+                    <span>
+                        Final portfolio
+                    </span>
+
+                    <strong id="finalValue">
+                        —
+                    </strong>
+
+                </div>
+
+
+                <div>
+
+                    <span>
+                        Strategy return
+                    </span>
+
+                    <strong id="btReturn">
+                        —
+                    </strong>
+
+                </div>
+
+
+                <div>
+
+                    <span>
+                        Benchmark return
+                    </span>
+
+                    <strong id="benchmarkReturn">
+                        —
+                    </strong>
+
+                </div>
+
+
+                <div>
+
+                    <span>
+                        Sharpe
+                    </span>
+
+                    <strong id="btSharpe">
+                        —
+                    </strong>
+
+                </div>
+
+
+                <div>
+
+                    <span>
+                        Max drawdown
+                    </span>
+
+                    <strong id="btDrawdown">
+                        —
+                    </strong>
+
+                </div>
+
+
+                <div>
+
+                    <span>
+                        Trades
+                    </span>
+
+                    <strong id="trades">
+                        —
+                    </strong>
+
+                </div>
+
             </div>
+
+
+            <!-- EQUITY CURVE -->
+
             <div id="equityChart"></div>
+
         </section>
+
+
+        <!-- ==================================================
+             CORRELATION
+        =================================================== -->
 
         <section class="card">
+
             <div class="section-head">
-                <div><h2>Cross-asset correlation</h2><p>How daily returns have moved together</p></div>
-                <button class="secondary" onclick="loadCorrelation()">Refresh</button>
+
+                <div>
+
+                    <h2>
+                        Cross-asset correlation
+                    </h2>
+
+                    <p>
+                        How daily returns have moved together
+                    </p>
+
+                </div>
+
+
+                <button
+                    type="button"
+                    class="secondary"
+                    onclick="loadCorrelation()"
+                >
+                    Refresh
+                </button>
+
             </div>
+
+
             <div class="correlation-layout">
+
                 <div id="heatmap"></div>
+
                 <div id="rollingChart"></div>
+
             </div>
+
         </section>
+
+
+        <!-- ==================================================
+             RESEARCH NOTE
+        =================================================== -->
 
         <section class="note">
-            <strong>Research note</strong>
-            <p>This dashboard is for historical research and education. Backtest results are simulations, not promises of future returns. The engine uses historical prices, avoids using future observations for signals, and includes transaction costs.</p>
+
+            <strong>
+                Research note
+            </strong>
+
+            <p>
+                This dashboard is designed for historical research
+                and education. Data is loaded from local historical
+                CSV datasets for Gold, Bitcoin and NVIDIA.
+                Backtest results are simulations, not promises of
+                future returns. The engine uses historical prices,
+                avoids using future observations for signals,
+                and includes transaction costs.
+            </p>
+
         </section>
+
+
     </main>
 
-    <footer>MarketLab · Built for quantitative research</footer>
+
+    <!-- ======================================================
+         FOOTER
+    ======================================================= -->
+
+    <footer>
+        MarketLab · Built for quantitative research
+    </footer>
+
 </div>
 
+
+<!-- ==========================================================
+     TOAST / NOTIFICATIONS
+=========================================================== -->
+
 <div id="toast"></div>
+
+
+<!-- ==========================================================
+     APPLICATION JAVASCRIPT
+=========================================================== -->
+
 <script src="{{ url_for('static', filename='app.js') }}"></script>
+
 </body>
-</html>
+    </html>
