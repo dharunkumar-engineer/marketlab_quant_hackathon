@@ -1,21 +1,24 @@
 import os
-import time
-import threading
-from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
-
 from flask import Flask, jsonify, render_template, request
 
 
 # ============================================================
-# MARKETLAB
-# Quantitative Multi-Asset Financial Intelligence Platform
+# APPLICATION
 # ============================================================
 
 app = Flask(__name__)
+
+
+# ============================================================
+# PATHS
+# ============================================================
+
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
 
 
 # ============================================================
@@ -26,14 +29,17 @@ ASSETS = {
     "gold": {
         "name": "Gold",
         "ticker": "GC=F",
+        "file": "gold.csv",
     },
     "bitcoin": {
         "name": "Bitcoin",
         "ticker": "BTC-USD",
+        "file": "bitcoin.csv",
     },
     "nvidia": {
         "name": "NVIDIA",
         "ticker": "NVDA",
+        "file": "nvidia.csv",
     },
 }
 
@@ -46,490 +52,312 @@ STRATEGIES = {
 }
 
 
-# ============================================================
-# CACHE
-# ============================================================
-
-CACHE_DIR = os.path.join(os.path.dirname(__file__), "data_cache")
-
-os.makedirs(CACHE_DIR, exist_ok=True)
-
-CACHE_SECONDS = 60 * 30  # 30 minutes
-
-_data_cache = {}
-_cache_lock = threading.Lock()
-
-
-# ============================================================
-# PERIOD CONVERSION
-# ============================================================
-
-PERIOD_MAP = {
-    "1mo": "1mo",
-    "3mo": "3mo",
-    "6mo": "6mo",
-    "1y": "1y",
-    "2y": "2y",
-    "5y": "5y",
-    "10y": "10y",
-    "max": "max",
+PERIOD_DAYS = {
+    "1y": 365,
+    "3y": 365 * 3,
+    "5y": 365 * 5,
+    "10y": 365 * 10,
+    "max": None,
 }
 
 
 # ============================================================
-# HELPERS
+# UTILITY FUNCTIONS
 # ============================================================
 
 def clean_number(value):
     """
-    Convert numpy/pandas numbers to JSON-safe numbers.
+    Convert pandas/numpy numeric values into JSON-safe numbers.
     """
+    if value is None:
+        return None
+
     try:
-        if value is None:
+        if pd.isna(value) or np.isinf(value):
             return None
 
-        value = float(value)
+        return round(float(value), 6)
 
-        if np.isnan(value) or np.isinf(value):
-            return None
-
-        return round(value, 6)
-
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 
-def safe_int(value, default):
-    try:
-        return int(value)
-    except Exception:
-        return default
-
-
-def safe_float(value, default):
-    try:
-        return float(value)
-    except Exception:
-        return default
-
-
-def normalize_columns(data):
+def normalize_column_name(column):
     """
-    Normalize yfinance output so that Open/High/Low/Close/Volume
-    are always simple columns.
+    Normalize CSV column names.
+
+    Examples:
+        Adj Close -> adj_close
+        Date      -> date
+        Trading Date -> trading_date
     """
-
-    if data is None or data.empty:
-        return data
-
-    if isinstance(data.columns, pd.MultiIndex):
-        data.columns = data.columns.get_level_values(0)
-
-    required = [
-        "Open",
-        "High",
-        "Low",
-        "Close",
-        "Volume",
-    ]
-
-    available = [
-        column for column in required
-        if column in data.columns
-    ]
-
-    if "Close" not in available:
-        return pd.DataFrame()
-
-    data = data[available].copy()
-
-    for column in available:
-        data[column] = pd.to_numeric(
-            data[column],
-            errors="coerce"
-        )
-
-    data = data.dropna(subset=["Close"])
-
-    data.index = pd.to_datetime(data.index)
-
-    if getattr(data.index, "tz", None) is not None:
-        data.index = data.index.tz_localize(None)
-
-    data = data.sort_index()
-
-    return data
-
-
-# ============================================================
-# LOCAL CACHE FILE
-# ============================================================
-
-def cache_file(asset, period):
-    safe_period = period.replace("/", "_")
-
-    return os.path.join(
-        CACHE_DIR,
-        f"{asset}_{safe_period}.csv"
+    return (
+        str(column)
+        .strip()
+        .lower()
+        .replace(" ", "_")
+        .replace("-", "_")
     )
 
 
-def save_disk_cache(asset, period, data):
+def find_column(columns, possible_names):
     """
-    Save downloaded market data locally.
-
-    Render's filesystem can be temporary, but this still prevents
-    repeated downloads during the lifetime of the running service.
+    Find a column using several possible names.
     """
+    normalized = {
+        normalize_column_name(col): col
+        for col in columns
+    }
 
-    try:
-        path = cache_file(asset, period)
+    for name in possible_names:
+        key = normalize_column_name(name)
 
-        data.to_csv(path)
+        if key in normalized:
+            return normalized[key]
 
-    except Exception as error:
-        print(
-            f"[CACHE] Could not save {asset}: {error}",
-            flush=True
-        )
-
-
-def load_disk_cache(asset, period):
-    """
-    Load previously cached market data if available.
-    """
-
-    path = cache_file(asset, period)
-
-    if not os.path.exists(path):
-        return None
-
-    try:
-        modified = os.path.getmtime(path)
-
-        age = time.time() - modified
-
-        if age > CACHE_SECONDS:
-            return None
-
-        data = pd.read_csv(
-            path,
-            index_col=0,
-            parse_dates=True
-        )
-
-        data = normalize_columns(data)
-
-        if data.empty:
-            return None
-
-        return data
-
-    except Exception as error:
-        print(
-            f"[CACHE] Could not read cache {asset}: {error}",
-            flush=True
-        )
-
-        return None
+    return None
 
 
 # ============================================================
-# MARKET DATA
+# CSV LOADING
 # ============================================================
-
-def download_market_data(asset, period):
-    """
-    Download historical market data.
-
-    Important:
-    - Only one download is attempted at a time.
-    - Threads are disabled.
-    - Yahoo errors are caught.
-    - The Flask worker is not intentionally crashed.
-    """
-
-    if asset not in ASSETS:
-        asset = "nvidia"
-
-    period = PERIOD_MAP.get(period, "5y")
-
-    ticker = ASSETS[asset]["ticker"]
-
-    print(
-        f"[DATA] Requesting {asset} ({ticker}) - {period}",
-        flush=True
-    )
-
-    try:
-
-        data = yf.download(
-            ticker,
-            period=period,
-            interval="1d",
-            auto_adjust=True,
-            progress=False,
-            threads=False,
-            group_by="column",
-        )
-
-        data = normalize_columns(data)
-
-        if data.empty:
-            raise ValueError(
-                f"No market data returned for {ticker}"
-            )
-
-        save_disk_cache(
-            asset,
-            period,
-            data
-        )
-
-        return data
-
-    except Exception as error:
-
-        print(
-            f"[DATA ERROR] {ticker}: {repr(error)}",
-            flush=True
-        )
-
-        raise RuntimeError(
-            f"Market data provider is temporarily unavailable "
-            f"for {ASSETS[asset]['name']}."
-        )
-
 
 def load_data(asset="nvidia", period="5y"):
     """
-    Main market-data loader.
+    Load historical market data from a local CSV file.
 
-    Order:
-
-    1. Memory cache
-    2. Local disk cache
-    3. Yahoo Finance
-    4. Clear API error
-
-    This prevents repeated Yahoo Finance requests.
+    No external API or Yahoo Finance dependency is used.
     """
 
     if asset not in ASSETS:
-        asset = "nvidia"
+        raise ValueError(f"Unknown asset: {asset}")
 
-    period = PERIOD_MAP.get(period, "5y")
+    file_name = ASSETS[asset]["file"]
+    file_path = DATA_DIR / file_name
 
-    cache_key = f"{asset}:{period}"
-
-    # --------------------------------------------------------
-    # MEMORY CACHE
-    # --------------------------------------------------------
-
-    with _cache_lock:
-
-        cached = _data_cache.get(cache_key)
-
-        if cached is not None:
-
-            timestamp, data = cached
-
-            if time.time() - timestamp < CACHE_SECONDS:
-
-                return data.copy()
-
-
-    # --------------------------------------------------------
-    # DISK CACHE
-    # --------------------------------------------------------
-
-    disk_data = load_disk_cache(
-        asset,
-        period
-    )
-
-    if disk_data is not None:
-
-        with _cache_lock:
-
-            _data_cache[cache_key] = (
-                time.time(),
-                disk_data.copy()
-            )
-
-        return disk_data.copy()
-
-
-    # --------------------------------------------------------
-    # DOWNLOAD
-    # --------------------------------------------------------
-
-    with _cache_lock:
-
-        # Check again after acquiring lock.
-        cached = _data_cache.get(cache_key)
-
-        if cached is not None:
-
-            timestamp, data = cached
-
-            if time.time() - timestamp < CACHE_SECONDS:
-
-                return data.copy()
-
-        data = download_market_data(
-            asset,
-            period
+    if not file_path.exists():
+        raise FileNotFoundError(
+            f"Dataset not found: {file_name}. "
+            f"Please place it inside the data folder."
         )
 
-        _data_cache[cache_key] = (
-            time.time(),
-            data.copy()
-        )
-
-        return data.copy()
-
-
-# ============================================================
-# QUANTITATIVE METRICS
-# ============================================================
-
-def metrics(data):
-
-    close = data["Close"].dropna()
-
-    if len(close) < 2:
+    try:
+        raw = pd.read_csv(file_path)
+    except Exception as exc:
         raise ValueError(
-            "Not enough historical data for analysis."
+            f"Could not read {file_name}: {exc}"
         )
 
-    returns = close.pct_change().dropna()
+    if raw.empty:
+        raise ValueError(f"{file_name} is empty.")
 
-    total_return = (
-        close.iloc[-1] /
-        close.iloc[0]
-        - 1
-    ) * 100
+    # --------------------------------------------------------
+    # Locate columns
+    # --------------------------------------------------------
 
-    # CAGR
-    days = (
-        close.index[-1] -
-        close.index[0]
-    ).days
+    date_col = find_column(
+        raw.columns,
+        [
+            "Date",
+            "Datetime",
+            "Timestamp",
+            "Trading Date",
+            "Trade Date",
+        ],
+    )
 
-    years = max(days / 365.25, 1 / 365.25)
+    open_col = find_column(
+        raw.columns,
+        ["Open", "Open Price"]
+    )
 
-    annual_return = (
-        (close.iloc[-1] /
-         close.iloc[0])
-        ** (1 / years)
-        - 1
-    ) * 100
+    high_col = find_column(
+        raw.columns,
+        ["High", "High Price"]
+    )
 
-    volatility = (
-        returns.std() *
-        np.sqrt(252)
-    ) * 100
+    low_col = find_column(
+        raw.columns,
+        ["Low", "Low Price"]
+    )
 
-    if returns.std() and not np.isnan(returns.std()):
+    close_col = find_column(
+        raw.columns,
+        [
+            "Close",
+            "Close Price",
+            "Adj Close",
+            "Adjusted Close",
+        ],
+    )
 
-        sharpe = (
-            returns.mean() /
-            returns.std()
-        ) * np.sqrt(252)
+    volume_col = find_column(
+        raw.columns,
+        [
+            "Volume",
+            "Volume Traded",
+            "Vol.",
+        ],
+    )
 
+    if date_col is None:
+        raise ValueError(
+            f"{file_name}: Date column could not be found."
+        )
+
+    if close_col is None:
+        raise ValueError(
+            f"{file_name}: Close column could not be found."
+        )
+
+    # --------------------------------------------------------
+    # Build standardized dataframe
+    # --------------------------------------------------------
+
+    data = pd.DataFrame()
+
+    data["Date"] = pd.to_datetime(
+        raw[date_col],
+        errors="coerce"
+    )
+
+    data["Close"] = pd.to_numeric(
+        raw[close_col],
+        errors="coerce"
+    )
+
+    if open_col is not None:
+        data["Open"] = pd.to_numeric(
+            raw[open_col],
+            errors="coerce"
+        )
     else:
-        sharpe = 0
+        data["Open"] = data["Close"]
 
-    running_max = close.cummax()
+    if high_col is not None:
+        data["High"] = pd.to_numeric(
+            raw[high_col],
+            errors="coerce"
+        )
+    else:
+        data["High"] = data["Close"]
 
-    drawdown = (
-        close /
-        running_max
-        - 1
+    if low_col is not None:
+        data["Low"] = pd.to_numeric(
+            raw[low_col],
+            errors="coerce"
+        )
+    else:
+        data["Low"] = data["Close"]
+
+    if volume_col is not None:
+        data["Volume"] = pd.to_numeric(
+            raw[volume_col],
+            errors="coerce"
+        )
+    else:
+        data["Volume"] = 0
+
+    # --------------------------------------------------------
+    # Clean data
+    # --------------------------------------------------------
+
+    data = data.dropna(
+        subset=["Date", "Close"]
     )
 
-    max_drawdown = (
-        drawdown.min() * 100
+    data = data.sort_values("Date")
+
+    data = data.drop_duplicates(
+        subset=["Date"],
+        keep="last"
     )
 
-    return {
-        "total_return": clean_number(
-            total_return
-        ),
+    data = data.set_index("Date")
 
-        "annual_return": clean_number(
-            annual_return
-        ),
+    # Remove invalid prices
+    data = data[
+        data["Close"] > 0
+    ]
 
-        "volatility": clean_number(
-            volatility
-        ),
+    # --------------------------------------------------------
+    # Apply requested period
+    # --------------------------------------------------------
 
-        "sharpe": clean_number(
-            sharpe
-        ),
+    if period not in PERIOD_DAYS:
+        period = "5y"
 
-        "max_drawdown": clean_number(
-            max_drawdown
-        ),
-    }
+    days = PERIOD_DAYS[period]
+
+    if days is not None and not data.empty:
+        latest_date = data.index.max()
+        start_date = latest_date - pd.Timedelta(days=days)
+
+        filtered = data[
+            data.index >= start_date
+        ]
+
+        # If filtering removes everything, use complete dataset
+        if not filtered.empty:
+            data = filtered
+
+    if data.empty:
+        raise ValueError(
+            f"No usable data available for {asset}."
+        )
+
+    return data
 
 
 # ============================================================
 # INDICATORS
 # ============================================================
 
-def add_indicators(
-    data,
-    fast=20,
-    slow=50
-):
+def add_indicators(data, fast=20, slow=50):
+    """
+    Add quantitative indicators required by the project.
+    """
 
-    fast = max(2, int(fast))
-    slow = max(
-        fast + 1,
-        int(slow)
-    )
+    if fast < 2:
+        fast = 2
+
+    if slow <= fast:
+        slow = fast + 1
 
     df = data.copy()
 
     close = df["Close"]
 
-    df["SMA Fast"] = (
-        close
-        .rolling(fast)
-        .mean()
-    )
+    # Moving averages
+    df["SMA Fast"] = close.rolling(
+        window=fast,
+        min_periods=fast
+    ).mean()
 
-    df["SMA Slow"] = (
-        close
-        .rolling(slow)
-        .mean()
-    )
+    df["SMA Slow"] = close.rolling(
+        window=slow,
+        min_periods=slow
+    ).mean()
 
-    df["EMA Fast"] = (
-        close
-        .ewm(
-            span=fast,
-            adjust=False
-        )
-        .mean()
-    )
+    df["EMA Fast"] = close.ewm(
+        span=fast,
+        adjust=False
+    ).mean()
 
-    df["EMA Slow"] = (
-        close
-        .ewm(
-            span=slow,
-            adjust=False
-        )
-        .mean()
-    )
+    df["EMA Slow"] = close.ewm(
+        span=slow,
+        adjust=False
+    ).mean()
 
-    df["Daily Return"] = (
-        close.pct_change()
-    )
+    # Daily returns
+    df["Daily Return"] = close.pct_change()
 
+    # Cumulative returns
+    df["Cumulative Return"] = (
+        1 + df["Daily Return"].fillna(0)
+    ).cumprod() - 1
+
+    # Rolling volatility
     df["Rolling Volatility"] = (
         df["Daily Return"]
         .rolling(30)
@@ -537,32 +365,243 @@ def add_indicators(
         * np.sqrt(252)
     )
 
-    df["Cumulative Return"] = (
-        1 +
-        df["Daily Return"].fillna(0)
-    ).cumprod() - 1
-
-    running_max = close.cummax()
-
-    df["Drawdown"] = (
-        close /
-        running_max
-        - 1
+    # Rolling 30-day return
+    df["Rolling Return 30D"] = (
+        close.pct_change(30)
     )
 
-    # Rolling return
-    df["Rolling Return"] = (
-        close /
-        close.shift(30)
-        - 1
+    # Rolling 90-day return
+    df["Rolling Return 90D"] = (
+        close.pct_change(90)
+    )
+
+    # Running maximum
+    df["Running Max"] = close.cummax()
+
+    # Asset drawdown
+    df["Drawdown"] = (
+        close / df["Running Max"] - 1
     )
 
     return df
 
 
 # ============================================================
-# BACKTEST ENGINE
+# PERFORMANCE METRICS
 # ============================================================
+
+def calculate_sharpe(returns):
+    """
+    Annualized Sharpe ratio using a zero risk-free rate.
+    """
+
+    returns = pd.Series(returns).dropna()
+
+    if len(returns) < 2:
+        return 0.0
+
+    std = returns.std()
+
+    if std == 0 or pd.isna(std):
+        return 0.0
+
+    return (
+        returns.mean() / std
+    ) * np.sqrt(252)
+
+
+def calculate_metrics(data):
+    """
+    Calculate historical performance metrics.
+    """
+
+    close = data["Close"].dropna()
+
+    if len(close) < 2:
+        return {
+            "total_return": 0,
+            "annual_return": 0,
+            "volatility": 0,
+            "sharpe": 0,
+            "max_drawdown": 0,
+        }
+
+    returns = close.pct_change().dropna()
+
+    # Total return
+    total_return = (
+        close.iloc[-1] / close.iloc[0] - 1
+    )
+
+    # CAGR
+    days = (
+        close.index[-1] - close.index[0]
+    ).days
+
+    years = max(days / 365.25, 1 / 365.25)
+
+    annual_return = (
+        (close.iloc[-1] / close.iloc[0])
+        ** (1 / years)
+        - 1
+    )
+
+    # Annualized volatility
+    volatility = (
+        returns.std() * np.sqrt(252)
+    )
+
+    # Sharpe
+    sharpe = calculate_sharpe(returns)
+
+    # Maximum drawdown
+    running_max = close.cummax()
+
+    drawdown = (
+        close / running_max - 1
+    )
+
+    max_drawdown = drawdown.min()
+
+    return {
+        "total_return": clean_number(
+            total_return * 100
+        ),
+        "annual_return": clean_number(
+            annual_return * 100
+        ),
+        "volatility": clean_number(
+            volatility * 100
+        ),
+        "sharpe": clean_number(
+            sharpe
+        ),
+        "max_drawdown": clean_number(
+            max_drawdown * 100
+        ),
+    }
+
+
+# ============================================================
+# MARKET REGIME
+# ============================================================
+
+def detect_market_regime(data):
+    """
+    Classify the current market environment using
+    trend and volatility.
+
+    Regimes:
+        Bull
+        Bear
+        High Volatility
+        Low Volatility
+    """
+
+    df = add_indicators(data)
+
+    if len(df) < 60:
+        return "Insufficient Data"
+
+    latest = df.iloc[-1]
+
+    price = latest["Close"]
+    sma = latest["SMA Slow"]
+    volatility = latest["Rolling Volatility"]
+
+    if pd.isna(sma) or pd.isna(volatility):
+        return "Insufficient Data"
+
+    historical_vol = (
+        df["Rolling Volatility"]
+        .dropna()
+    )
+
+    if historical_vol.empty:
+        return "Insufficient Data"
+
+    median_vol = historical_vol.median()
+
+    if volatility > median_vol * 1.5:
+        return "High Volatility"
+
+    if price > sma:
+        return "Bull"
+
+    if price < sma:
+        return "Bear"
+
+    if volatility < median_vol * 0.75:
+        return "Low Volatility"
+
+    return "Low Volatility"
+
+
+# ============================================================
+# BACKTESTING
+# ============================================================
+
+def create_strategy_signal(
+    df,
+    strategy,
+    fast=20,
+    slow=50
+):
+    """
+    Generate trading signals.
+
+    Signal:
+        1 = invested
+        0 = out of market
+    """
+
+    close = df["Close"]
+
+    if strategy == "sma":
+
+        signal = (
+            df["SMA Fast"]
+            > df["SMA Slow"]
+        ).astype(int)
+
+    elif strategy == "ema":
+
+        signal = (
+            df["EMA Fast"]
+            > df["EMA Slow"]
+        ).astype(int)
+
+    elif strategy == "momentum":
+
+        lookback = max(fast, 20)
+
+        signal = (
+            close
+            > close.shift(lookback)
+        ).astype(int)
+
+    elif strategy == "mean_reversion":
+
+        mean = (
+            close
+            .rolling(fast)
+            .mean()
+        )
+
+        # Buy when price is at least 3%
+        # below its moving average.
+        signal = (
+            close
+            < mean * 0.97
+        ).astype(int)
+
+    else:
+        raise ValueError(
+            f"Unknown strategy: {strategy}"
+        )
+
+    return signal.fillna(0)
+
 
 def backtest(
     data,
@@ -572,19 +611,23 @@ def backtest(
     fast=20,
     slow=50
 ):
+    """
+    Run a historical strategy backtest.
 
-    if strategy not in STRATEGIES:
-        strategy = "sma"
+    Important:
+    The signal is shifted by one trading day
+    to reduce look-ahead bias.
+    """
 
-    initial_capital = max(
-        float(initial_capital),
-        1
-    )
+    if initial_capital <= 0:
+        raise ValueError(
+            "Initial capital must be greater than zero."
+        )
 
-    transaction_cost = max(
-        float(transaction_cost),
-        0
-    )
+    if transaction_cost < 0:
+        raise ValueError(
+            "Transaction cost cannot be negative."
+        )
 
     df = add_indicators(
         data,
@@ -594,214 +637,144 @@ def backtest(
 
     close = df["Close"]
 
-    # --------------------------------------------------------
-    # STRATEGY SIGNALS
-    # --------------------------------------------------------
+    # Strategy signal
+    signal = create_strategy_signal(
+        df,
+        strategy,
+        fast,
+        slow
+    )
 
-    if strategy == "sma":
-
-        signal = (
-            df["SMA Fast"] >
-            df["SMA Slow"]
-        ).astype(int)
-
-    elif strategy == "ema":
-
-        signal = (
-            df["EMA Fast"] >
-            df["EMA Slow"]
-        ).astype(int)
-
-    elif strategy == "momentum":
-
-        signal = (
-            close >
-            close.shift(20)
-        ).astype(int)
-
-    elif strategy == "mean_reversion":
-
-        rolling_mean = (
-            close
-            .rolling(20)
-            .mean()
-        )
-
-        signal = (
-            close <
-            rolling_mean * 0.97
-        ).astype(int)
-
-    else:
-
-        signal = pd.Series(
-            0,
-            index=df.index
-        )
-
-
-    signal = signal.fillna(0)
-
-    # --------------------------------------------------------
-    # POSITION CHANGES
-    # --------------------------------------------------------
-
+    # Position change
     position_change = (
-        signal
-        .diff()
+        signal.diff()
         .abs()
         .fillna(signal.abs())
     )
 
-    # --------------------------------------------------------
-    # RETURNS
-    # --------------------------------------------------------
-
+    # Daily asset return
     asset_return = (
         close
         .pct_change()
         .fillna(0)
     )
 
-    strategy_return = (
+    # Use previous day's signal
+    # to avoid look-ahead bias.
+    strategy_position = (
         signal.shift(1)
         .fillna(0)
+    )
+
+    strategy_return = (
+        strategy_position
         * asset_return
     )
 
     # Transaction costs
     strategy_return = (
-        strategy_return -
-        position_change *
-        transaction_cost
+        strategy_return
+        - position_change * transaction_cost
     )
 
-    # Avoid impossible negative multiplier
-    strategy_return = strategy_return.clip(
-        lower=-0.999
-    )
-
-    # --------------------------------------------------------
-    # EQUITY
-    # --------------------------------------------------------
-
+    # Portfolio equity
     equity = (
-        initial_capital *
-        (
-            1 +
-            strategy_return
-        ).cumprod()
+        initial_capital
+        * (1 + strategy_return)
+        .cumprod()
     )
 
+    # Buy and hold benchmark
     benchmark = (
-        initial_capital *
-        (
-            1 +
-            asset_return
-        ).cumprod()
+        initial_capital
+        * (1 + asset_return)
+        .cumprod()
     )
 
+    # Strategy drawdown
+    strategy_running_max = (
+        equity.cummax()
+    )
+
+    drawdown = (
+        equity
+        / strategy_running_max
+        - 1
+    )
+
+    # Add results
     result = df.copy()
 
     result["Signal"] = signal
-
-    result["Strategy Return"] = (
-        strategy_return
-    )
-
+    result["Position"] = strategy_position
+    result["Asset Return"] = asset_return
+    result["Strategy Return"] = strategy_return
     result["Equity"] = equity
-
     result["Benchmark"] = benchmark
-
-    result["Drawdown"] = (
-        equity /
-        equity.cummax()
-        - 1
-    )
+    result["Drawdown"] = drawdown
 
     # --------------------------------------------------------
-    # STRATEGY METRICS
+    # Strategy metrics
     # --------------------------------------------------------
 
-    valid_returns = (
-        strategy_return
-        .replace(
-            [np.inf, -np.inf],
-            np.nan
-        )
-        .dropna()
-    )
+    final_value = equity.iloc[-1]
 
-    if (
-        len(valid_returns) > 1
-        and valid_returns.std() != 0
-    ):
-
-        sharpe = (
-            valid_returns.mean() /
-            valid_returns.std()
-        ) * np.sqrt(252)
-
-    else:
-
-        sharpe = 0
-
-    total_return = (
-        equity.iloc[-1] /
-        initial_capital
+    strategy_total_return = (
+        final_value
+        / initial_capital
         - 1
-    ) * 100
+    )
 
     benchmark_return = (
-        benchmark.iloc[-1] /
-        initial_capital
+        benchmark.iloc[-1]
+        / initial_capital
         - 1
-    ) * 100
-
-    max_drawdown = (
-        result["Drawdown"]
-        .min()
-        * 100
     )
 
-    trades = int(
-        (
-            position_change > 0
-        ).sum()
+    strategy_sharpe = calculate_sharpe(
+        strategy_return
     )
 
-    strategy_volatility = (
-        valid_returns.std()
-        * np.sqrt(252)
-        * 100
+    max_drawdown = drawdown.min()
+
+    number_of_trades = int(
+        (position_change > 0).sum()
+    )
+
+    # Winning trading days
+    active_returns = strategy_return[
+        strategy_position > 0
+    ]
+
+    winning_days = int(
+        (active_returns > 0).sum()
+    )
+
+    losing_days = int(
+        (active_returns < 0).sum()
     )
 
     summary = {
-
+        "initial_capital": clean_number(
+            initial_capital
+        ),
         "final_value": clean_number(
-            equity.iloc[-1]
+            final_value
         ),
-
         "return": clean_number(
-            total_return
+            strategy_total_return * 100
         ),
-
         "sharpe": clean_number(
-            sharpe
+            strategy_sharpe
         ),
-
-        "volatility": clean_number(
-            strategy_volatility
-        ),
-
         "max_drawdown": clean_number(
-            max_drawdown
+            max_drawdown * 100
         ),
-
-        "trades": trades,
-
+        "trades": number_of_trades,
+        "winning_days": winning_days,
+        "losing_days": losing_days,
         "benchmark_return": clean_number(
-            benchmark_return
+            benchmark_return * 100
         ),
     }
 
@@ -809,106 +782,145 @@ def backtest(
 
 
 # ============================================================
-# CHART SERIALIZER
+# CHART DATA
 # ============================================================
 
-def serialize_analysis(df):
+def build_analysis_chart(data, max_rows=365):
     """
-    Convert DataFrame to frontend-friendly arrays.
+    Prepare chart-friendly JSON data.
     """
 
-    recent = df.tail(365)
+    if data.empty:
+        return []
 
-    dates = []
-    close = []
-    sma_fast = []
-    sma_slow = []
-    ema_fast = []
-    ema_slow = []
-    daily_return = []
-    volatility = []
-    cumulative_return = []
-    drawdown = []
-    rolling_return = []
+    recent = data.tail(max_rows)
 
-    for index, row in recent.iterrows():
+    chart = []
 
-        dates.append(
-            index.strftime("%Y-%m-%d")
-        )
+    for idx, row in recent.iterrows():
 
-        close.append(
-            clean_number(row["Close"])
-        )
+        chart.append({
+            "date": idx.strftime("%Y-%m-%d"),
 
-        sma_fast.append(
-            clean_number(row["SMA Fast"])
-        )
+            "open": clean_number(
+                row.get("Open")
+            ),
 
-        sma_slow.append(
-            clean_number(row["SMA Slow"])
-        )
+            "high": clean_number(
+                row.get("High")
+            ),
 
-        ema_fast.append(
-            clean_number(row["EMA Fast"])
-        )
+            "low": clean_number(
+                row.get("Low")
+            ),
 
-        ema_slow.append(
-            clean_number(row["EMA Slow"])
-        )
+            "close": clean_number(
+                row.get("Close")
+            ),
 
-        daily_return.append(
-            clean_number(
-                row["Daily Return"] * 100
-            )
-        )
+            "volume": clean_number(
+                row.get("Volume")
+            ),
 
-        volatility.append(
-            clean_number(
-                row["Rolling Volatility"] * 100
-            )
-        )
+            "sma_fast": clean_number(
+                row.get("SMA Fast")
+            ),
 
-        cumulative_return.append(
-            clean_number(
-                row["Cumulative Return"] * 100
-            )
-        )
+            "sma_slow": clean_number(
+                row.get("SMA Slow")
+            ),
 
-        drawdown.append(
-            clean_number(
-                row["Drawdown"] * 100
-            )
-        )
+            "ema_fast": clean_number(
+                row.get("EMA Fast")
+            ),
 
-        rolling_return.append(
-            clean_number(
-                row["Rolling Return"] * 100
-            )
-        )
+            "ema_slow": clean_number(
+                row.get("EMA Slow")
+            ),
 
-    return {
-        "dates": dates,
-        "close": close,
-        "sma_fast": sma_fast,
-        "sma_slow": sma_slow,
-        "ema_fast": ema_fast,
-        "ema_slow": ema_slow,
-        "daily_return": daily_return,
-        "volatility": volatility,
-        "cumulative_return": cumulative_return,
-        "drawdown": drawdown,
-        "rolling_return": rolling_return,
-    }
+            "return": clean_number(
+                row.get("Daily Return", 0) * 100
+            ),
+
+            "cumulative_return": clean_number(
+                row.get("Cumulative Return", 0) * 100
+            ),
+
+            "volatility": clean_number(
+                row.get("Rolling Volatility", 0) * 100
+            ),
+
+            "drawdown": clean_number(
+                row.get("Drawdown", 0) * 100
+            ),
+
+            "rolling_return_30d": clean_number(
+                row.get("Rolling Return 30D", 0) * 100
+            ),
+
+            "rolling_return_90d": clean_number(
+                row.get("Rolling Return 90D", 0) * 100
+            ),
+        })
+
+    return chart
+
+
+def build_backtest_chart(result, max_rows=365):
+    """
+    Prepare backtest chart data.
+    """
+
+    recent = result.tail(max_rows)
+
+    chart = []
+
+    for idx, row in recent.iterrows():
+
+        chart.append({
+            "date": idx.strftime("%Y-%m-%d"),
+
+            "equity": clean_number(
+                row.get("Equity")
+            ),
+
+            "benchmark": clean_number(
+                row.get("Benchmark")
+            ),
+
+            "drawdown": clean_number(
+                row.get("Drawdown", 0) * 100
+            ),
+
+            "signal": int(
+                row.get("Signal", 0)
+            ),
+
+            "close": clean_number(
+                row.get("Close")
+            ),
+        })
+
+    return chart
 
 
 # ============================================================
-# HOME
+# ERROR RESPONSE
+# ============================================================
+
+def error_response(message, status_code=400):
+    return jsonify({
+        "status": "error",
+        "message": str(message),
+    }), status_code
+
+
+# ============================================================
+# ROUTES
 # ============================================================
 
 @app.route("/")
 def index():
-
     return render_template(
         "index.html",
         assets=ASSETS,
@@ -916,9 +928,65 @@ def index():
     )
 
 
-# ============================================================
-# ANALYSIS API
-# ============================================================
+# ------------------------------------------------------------
+# Assets API
+# ------------------------------------------------------------
+
+@app.route("/api/assets")
+def assets_api():
+
+    result = {}
+
+    for key, info in ASSETS.items():
+
+        file_path = DATA_DIR / info["file"]
+
+        available = file_path.exists()
+
+        rows = 0
+        start_date = None
+        end_date = None
+
+        if available:
+
+            try:
+                df = load_data(
+                    key,
+                    "max"
+                )
+
+                rows = len(df)
+
+                if not df.empty:
+                    start_date = (
+                        df.index.min()
+                        .strftime("%Y-%m-%d")
+                    )
+
+                    end_date = (
+                        df.index.max()
+                        .strftime("%Y-%m-%d")
+                    )
+
+            except Exception:
+                available = False
+
+        result[key] = {
+            "name": info["name"],
+            "ticker": info["ticker"],
+            "file": info["file"],
+            "available": available,
+            "rows": rows,
+            "start_date": start_date,
+            "end_date": end_date,
+        }
+
+    return jsonify(result)
+
+
+# ------------------------------------------------------------
+# Analysis API
+# ------------------------------------------------------------
 
 @app.route("/api/analysis")
 def analysis():
@@ -935,21 +1003,39 @@ def analysis():
             "5y"
         )
 
-        fast = safe_int(
-            request.args.get("fast", 20),
-            20
+        fast = int(
+            request.args.get(
+                "fast",
+                20
+            )
         )
 
-        slow = safe_int(
-            request.args.get("slow", 50),
-            50
+        slow = int(
+            request.args.get(
+                "slow",
+                50
+            )
         )
 
         if asset not in ASSETS:
-            asset = "nvidia"
+            return error_response(
+                "Invalid asset."
+            )
 
-        if period not in PERIOD_MAP:
-            period = "5y"
+        if period not in PERIOD_DAYS:
+            return error_response(
+                "Invalid period."
+            )
+
+        if fast < 2:
+            return error_response(
+                "Fast moving-average period must be at least 2."
+            )
+
+        if slow <= fast:
+            return error_response(
+                "Slow moving-average period must be greater than fast period."
+            )
 
         data = load_data(
             asset,
@@ -962,9 +1048,15 @@ def analysis():
             slow
         )
 
-        m = metrics(data)
+        metrics = calculate_metrics(
+            data
+        )
 
-        chart = serialize_analysis(
+        regime = detect_market_regime(
+            data
+        )
+
+        chart = build_analysis_chart(
             data
         )
 
@@ -976,43 +1068,45 @@ def analysis():
 
             "ticker": ASSETS[asset]["ticker"],
 
-            "metrics": m,
+            "period": period,
 
-            **chart,
+            "metrics": metrics,
+
+            "regime": regime,
 
             "last_price": clean_number(
                 data["Close"].iloc[-1]
             ),
 
-            "last_date":
-                data.index[-1].strftime(
-                    "%Y-%m-%d"
-                ),
+            "last_date": data.index[-1].strftime(
+                "%Y-%m-%d"
+            ),
+
+            "data_points": len(data),
+
+            "chart": chart,
         })
 
-    except Exception as error:
+    except FileNotFoundError as exc:
 
-        print(
-            f"[ANALYSIS ERROR] {repr(error)}",
-            flush=True
+        return error_response(
+            str(exc),
+            404
         )
 
-        return jsonify({
+    except Exception as exc:
 
-            "status": "error",
-
-            "error":
-                "Market data is temporarily unavailable. "
-                "Please try again later.",
-
-        }), 503
+        return error_response(
+            str(exc),
+            500
+        )
 
 
-# ============================================================
-# BACKTEST API
-# ============================================================
+# ------------------------------------------------------------
+# Backtesting API
+# ------------------------------------------------------------
 
-@app.route("/api/backtest")
+@app.route("/api/backtest", methods=["GET"])
 def run_backtest():
 
     try:
@@ -1032,55 +1126,69 @@ def run_backtest():
             "5y"
         )
 
-        capital = safe_float(
+        capital = float(
             request.args.get(
                 "capital",
                 100000
-            ),
-            100000
+            )
         )
 
-        # Support both names:
-        # transaction_cost and cost
-        cost = request.args.get(
-            "transaction_cost"
-        )
-
-        if cost is None:
-            cost = request.args.get(
+        cost = float(
+            request.args.get(
                 "cost",
                 0.001
             )
-
-        cost = safe_float(
-            cost,
-            0.001
         )
 
-        fast = safe_int(
+        fast = int(
             request.args.get(
                 "fast",
                 20
-            ),
-            20
+            )
         )
 
-        slow = safe_int(
+        slow = int(
             request.args.get(
                 "slow",
                 50
-            ),
-            50
+            )
         )
 
+        # Validation
         if asset not in ASSETS:
-            asset = "nvidia"
+            return error_response(
+                "Invalid asset."
+            )
 
         if strategy not in STRATEGIES:
-            strategy = "sma"
+            return error_response(
+                "Invalid strategy."
+            )
 
-        if period not in PERIOD_MAP:
-            period = "5y"
+        if period not in PERIOD_DAYS:
+            return error_response(
+                "Invalid period."
+            )
+
+        if capital <= 0:
+            return error_response(
+                "Capital must be greater than zero."
+            )
+
+        if cost < 0:
+            return error_response(
+                "Transaction cost cannot be negative."
+            )
+
+        if fast < 2:
+            return error_response(
+                "Fast period must be at least 2."
+            )
+
+        if slow <= fast:
+            return error_response(
+                "Slow period must be greater than fast period."
+            )
 
         data = load_data(
             asset,
@@ -1088,103 +1196,67 @@ def run_backtest():
         )
 
         result, summary = backtest(
-            data,
-            strategy,
-            capital,
-            cost,
-            fast,
-            slow
+            data=data,
+            strategy=strategy,
+            initial_capital=capital,
+            transaction_cost=cost,
+            fast=fast,
+            slow=slow
         )
 
-        recent = result.tail(365)
-
-        dates = []
-        strategy_equity = []
-        benchmark_equity = []
-        drawdown = []
-        signals = []
-
-        for index, row in recent.iterrows():
-
-            dates.append(
-                index.strftime("%Y-%m-%d")
-            )
-
-            strategy_equity.append(
-                clean_number(
-                    row["Equity"]
-                )
-            )
-
-            benchmark_equity.append(
-                clean_number(
-                    row["Benchmark"]
-                )
-            )
-
-            drawdown.append(
-                clean_number(
-                    row["Drawdown"] * 100
-                )
-            )
-
-            signals.append(
-                int(row["Signal"])
-            )
+        chart = build_backtest_chart(
+            result
+        )
 
         return jsonify({
 
             "status": "ok",
 
-            "asset":
-                ASSETS[asset]["name"],
+            "asset": ASSETS[asset]["name"],
 
-            "strategy":
-                STRATEGIES[strategy],
+            "ticker": ASSETS[asset]["ticker"],
 
-            "metrics":
-                summary,
+            "strategy": STRATEGIES[strategy],
 
-            "summary":
-                summary,
+            "period": period,
 
-            "dates":
-                dates,
+            "parameters": {
+                "initial_capital": capital,
+                "transaction_cost": cost,
+                "fast_period": fast,
+                "slow_period": slow,
+            },
 
-            "strategy_equity":
-                strategy_equity,
+            "summary": summary,
 
-            "benchmark_equity":
-                benchmark_equity,
-
-            "drawdown":
-                drawdown,
-
-            "signals":
-                signals,
-
+            "chart": chart,
         })
 
-    except Exception as error:
+    except FileNotFoundError as exc:
 
-        print(
-            f"[BACKTEST ERROR] {repr(error)}",
-            flush=True
+        return error_response(
+            str(exc),
+            404
         )
 
-        return jsonify({
+    except ValueError as exc:
 
-            "status": "error",
+        return error_response(
+            str(exc),
+            400
+        )
 
-            "error":
-                "Backtest data is temporarily unavailable."
+    except Exception as exc:
 
-        }), 503
+        return error_response(
+            str(exc),
+            500
+        )
 
 
-# ============================================================
-# CORRELATION API
-# ============================================================
+# ------------------------------------------------------------
+# Correlation API
+# ------------------------------------------------------------
 
 @app.route("/api/correlation")
 def correlation():
@@ -1196,150 +1268,212 @@ def correlation():
             "5y"
         )
 
+        if period not in PERIOD_DAYS:
+            return error_response(
+                "Invalid period."
+            )
+
         series = {}
 
         for key, info in ASSETS.items():
 
-            df = load_data(
+            data = load_data(
                 key,
                 period
             )
 
-            series[
-                info["name"]
-            ] = df["Close"].pct_change()
-
-        returns = (
-            pd.DataFrame(series)
-            .dropna()
-        )
-
-        if returns.empty:
-            raise ValueError(
-                "Correlation data unavailable."
+            returns = (
+                data["Close"]
+                .pct_change()
+                .rename(info["name"])
             )
 
-        corr = returns.corr()
+            series[info["name"]] = returns
 
-        labels = list(
-            corr.columns
+        returns_df = pd.concat(
+            series.values(),
+            axis=1,
+            join="inner"
         )
 
-        matrix = [
-            [
-                clean_number(
+        returns_df = returns_df.dropna()
+
+        if returns_df.empty:
+            return error_response(
+                "Not enough overlapping data to calculate correlation."
+            )
+
+        corr = returns_df.corr()
+
+        matrix = {}
+
+        for row in corr.index:
+
+            matrix[row] = {}
+
+            for col in corr.columns:
+
+                matrix[row][col] = clean_number(
                     corr.loc[row, col]
                 )
-                for col in labels
-            ]
-            for row in labels
-        ]
 
         # ----------------------------------------------------
-        # Rolling BTC / NVIDIA correlation
+        # Rolling correlation: Bitcoin vs NVIDIA
         # ----------------------------------------------------
 
         rolling_data = []
 
         if (
-            "Bitcoin" in returns.columns
+            "Bitcoin" in returns_df.columns
             and
-            "NVIDIA" in returns.columns
+            "NVIDIA" in returns_df.columns
         ):
 
             rolling = (
-                returns["Bitcoin"]
+                returns_df["Bitcoin"]
                 .rolling(60)
                 .corr(
-                    returns["NVIDIA"]
+                    returns_df["NVIDIA"]
                 )
                 .dropna()
                 .tail(365)
             )
 
-            rolling_dates = []
-            rolling_values = []
+            for idx, value in rolling.items():
 
-            for index, value in rolling.items():
-
-                rolling_dates.append(
-                    index.strftime(
+                rolling_data.append({
+                    "date": idx.strftime(
                         "%Y-%m-%d"
-                    )
-                )
+                    ),
 
-                rolling_values.append(
-                    clean_number(value)
-                )
-
-        else:
-
-            rolling_dates = []
-            rolling_values = []
+                    "value": clean_number(
+                        value
+                    ),
+                })
 
         return jsonify({
 
             "status": "ok",
 
-            "labels": labels,
+            "period": period,
 
             "matrix": matrix,
 
-            "rolling_dates":
-                rolling_dates,
+            "rolling_btc_nvidia": rolling_data,
 
-            "rolling_correlation":
-                rolling_values,
-
-            # Compatibility with older frontend
-            "rolling_btc_nvidia": [
-                {
-                    "date": date,
-                    "value": value
-                }
-
-                for date, value
-                in zip(
-                    rolling_dates,
-                    rolling_values
-                )
-            ],
+            "data_points": len(
+                returns_df
+            ),
         })
 
-    except Exception as error:
+    except FileNotFoundError as exc:
 
-        print(
-            f"[CORRELATION ERROR] {repr(error)}",
-            flush=True
+        return error_response(
+            str(exc),
+            404
         )
 
+    except Exception as exc:
+
+        return error_response(
+            str(exc),
+            500
+        )
+
+
+# ------------------------------------------------------------
+# Market Regimes API
+# ------------------------------------------------------------
+
+@app.route("/api/regimes")
+def regimes():
+
+    try:
+
+        period = request.args.get(
+            "period",
+            "5y"
+        )
+
+        result = {}
+
+        for key, info in ASSETS.items():
+
+            data = load_data(
+                key,
+                period
+            )
+
+            regime = detect_market_regime(
+                data
+            )
+
+            result[key] = {
+                "asset": info["name"],
+                "regime": regime,
+                "last_price": clean_number(
+                    data["Close"].iloc[-1]
+                ),
+                "last_date": data.index[-1].strftime(
+                    "%Y-%m-%d"
+                ),
+            }
+
         return jsonify({
+            "status": "ok",
+            "period": period,
+            "regimes": result,
+        })
 
-            "status": "error",
+    except FileNotFoundError as exc:
 
-            "error":
-                "Correlation data is temporarily unavailable."
+        return error_response(
+            str(exc),
+            404
+        )
 
-        }), 503
+    except Exception as exc:
+
+        return error_response(
+            str(exc),
+            500
+        )
 
 
-# ============================================================
-# HEALTH
-# ============================================================
+# ------------------------------------------------------------
+# Health API
+# ------------------------------------------------------------
 
 @app.route("/api/health")
 def health():
+
+    files = {}
+
+    for key, info in ASSETS.items():
+
+        path = DATA_DIR / info["file"]
+
+        files[key] = {
+            "file": info["file"],
+            "available": path.exists(),
+        }
+
+    all_available = all(
+        item["available"]
+        for item in files.values()
+    )
 
     return jsonify({
 
         "status": "ok",
 
-        "service":
-            "MarketLab Quantitative Financial Intelligence Platform",
+        "data_source": "local_csv",
 
-        "timestamp":
-            datetime.utcnow().isoformat() + "Z",
+        "external_market_api": False,
 
+        "datasets_ready": all_available,
+
+        "files": files,
     })
 
 
@@ -1350,32 +1484,29 @@ def health():
 @app.errorhandler(404)
 def not_found(error):
 
-    return jsonify({
-        "status": "error",
-        "error": "Endpoint not found."
-    }), 404
+    if request.path.startswith("/api/"):
+        return error_response(
+            "API endpoint not found.",
+            404
+        )
+
+    return error
 
 
 @app.errorhandler(500)
 def internal_error(error):
 
-    print(
-        f"[500 ERROR] {repr(error)}",
-        flush=True
-    )
+    if request.path.startswith("/api/"):
+        return error_response(
+            "Internal server error.",
+            500
+        )
 
-    return jsonify({
-
-        "status": "error",
-
-        "error":
-            "An internal server error occurred."
-
-    }), 500
+    return error
 
 
 # ============================================================
-# RUN
+# START APPLICATION
 # ============================================================
 
 if __name__ == "__main__":
