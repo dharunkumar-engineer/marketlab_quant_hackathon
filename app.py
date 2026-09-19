@@ -1259,7 +1259,7 @@ def run_backtest():
 # ------------------------------------------------------------
 
 
-        @app.route("/api/correlation")
+@app.route("/api/correlation")
 def correlation():
 
     try:
