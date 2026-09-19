@@ -126,6 +126,10 @@ def load_data(asset="nvidia", period="5y"):
     """
     Load historical market data from a local CSV file.
 
+    Supports:
+    1. Normal CSV files
+    2. Yahoo Finance-style CSV files with a two-row header
+
     No external API or Yahoo Finance dependency is used.
     """
 
@@ -141,63 +145,332 @@ def load_data(asset="nvidia", period="5y"):
             f"Please place it inside the data folder."
         )
 
+    # ========================================================
+    # READ CSV
+    # ========================================================
+
     try:
-    # First try normal CSV format
-    raw = pd.read_csv(
-        file_path,
-        low_memory=False
-    )
 
-    # NVIDIA Yahoo Finance CSV has a 2-row header:
-    # Price, Adj Close, Close, High, Low, Open, Volume
-    # Ticker, NVDA, NVDA, NVDA, NVDA, NVDA, NVDA
-    #
-    # If the first column is not a normal data column,
-    # try reading it as a multi-level header.
+        # First try normal CSV format
+        raw = pd.read_csv(
+            file_path,
+            low_memory=False
+        )
 
-    first_col = str(raw.columns[0]).strip().lower()
+        # Check first column
+        first_col = str(
+            raw.columns[0]
+        ).strip().lower()
 
-    if first_col not in [
-        "date",
-        "datetime",
-        "timestamp",
-        "time",
-        "day"
-    ]:
+        # ----------------------------------------------------
+        # Yahoo Finance-style CSV detection
+        # ----------------------------------------------------
+        #
+        # Example:
+        #
+        # Price,Adj Close,Close,High,Low,Open,Volume
+        # Ticker,NVDA,NVDA,NVDA,NVDA,NVDA,NVDA
+        # Date
+        # 2018-01-02,...
+        #
+        # In this format Date is the index and the header
+        # contains two rows.
+        # ----------------------------------------------------
 
-        try:
-            yahoo_raw = pd.read_csv(
-                file_path,
-                header=[0, 1],
-                index_col=0,
-                low_memory=False
-            )
+        if first_col not in [
+            "date",
+            "datetime",
+            "timestamp",
+            "time",
+            "day"
+        ]:
 
-            if isinstance(
-                yahoo_raw.columns,
-                pd.MultiIndex
-            ):
-                yahoo_raw.columns = [
-                    str(col[0]).strip()
-                    for col in yahoo_raw.columns
-                ]
+            try:
 
-            yahoo_raw.index.name = "Date"
+                yahoo_raw = pd.read_csv(
+                    file_path,
+                    header=[0, 1],
+                    index_col=0,
+                    low_memory=False
+                )
 
-            raw = yahoo_raw.reset_index()
+                if isinstance(
+                    yahoo_raw.columns,
+                    pd.MultiIndex
+                ):
 
-        except Exception:
-            # Keep the normal CSV if Yahoo-style parsing fails
-            pass
+                    yahoo_raw.columns = [
+                        str(col[0]).strip()
+                        for col in yahoo_raw.columns
+                    ]
 
-except Exception as exc:
-    raise ValueError(
-        f"Could not read {file_name}: {exc}"
-    )
+                yahoo_raw.index.name = "Date"
+
+                raw = yahoo_raw.reset_index()
+
+            except Exception:
+                # Keep the normal CSV if multi-header
+                # parsing is unsuccessful.
+                pass
+
+    except Exception as exc:
+
+        raise ValueError(
+            f"Could not read {file_name}: {exc}"
+        )
+
+    # ========================================================
+    # EMPTY CHECK
+    # ========================================================
 
     if raw.empty:
-        raise ValueError(f"{file_name} is empty.")
+        raise ValueError(
+            f"{file_name} is empty."
+        )
 
+    # ========================================================
+    # LOCATE DATE COLUMN
+    # ========================================================
+
+    date_col = find_column(
+        raw.columns,
+        [
+            "Date",
+            "Datetime",
+            "Timestamp",
+            "Trading Date",
+            "Trade Date",
+            "Date Time",
+            "Date/Time",
+            "Time",
+            "Day",
+            "Trade_Date",
+            "Trading_Date",
+            "Price Date",
+            "Price_Date",
+            "DateTime",
+            "Timestamp UTC",
+        ],
+    )
+
+    # ========================================================
+    # FALLBACK DATE DETECTION
+    # ========================================================
+
+    if date_col is None and len(raw.columns) > 0:
+
+        first_column = raw.columns[0]
+
+        parsed_dates = pd.to_datetime(
+            raw[first_column],
+            errors="coerce"
+        )
+
+        if (
+            parsed_dates.notna().mean()
+            >= 0.8
+        ):
+
+            date_col = first_column
+
+    # ========================================================
+    # LOCATE PRICE COLUMNS
+    # ========================================================
+
+    open_col = find_column(
+        raw.columns,
+        [
+            "Open",
+            "Open Price",
+        ]
+    )
+
+    high_col = find_column(
+        raw.columns,
+        [
+            "High",
+            "High Price",
+        ]
+    )
+
+    low_col = find_column(
+        raw.columns,
+        [
+            "Low",
+            "Low Price",
+        ]
+    )
+
+    close_col = find_column(
+        raw.columns,
+        [
+            "Close",
+            "Close Price",
+            "Adj Close",
+            "Adjusted Close",
+        ]
+    )
+
+    volume_col = find_column(
+        raw.columns,
+        [
+            "Volume",
+            "Volume Traded",
+            "Vol.",
+            "Vol",
+        ]
+    )
+
+    # ========================================================
+    # VALIDATE REQUIRED COLUMNS
+    # ========================================================
+
+    if date_col is None:
+
+        raise ValueError(
+            f"{file_name}: Date column could not be found. "
+            f"Available columns: {list(raw.columns)}"
+        )
+
+    if close_col is None:
+
+        raise ValueError(
+            f"{file_name}: Close column could not be found. "
+            f"Available columns: {list(raw.columns)}"
+        )
+
+    # ========================================================
+    # BUILD STANDARDIZED DATAFRAME
+    # ========================================================
+
+    data = pd.DataFrame()
+
+    data["Date"] = pd.to_datetime(
+        raw[date_col],
+        errors="coerce"
+    )
+
+    data["Close"] = pd.to_numeric(
+        raw[close_col],
+        errors="coerce"
+    )
+
+    # Open
+    if open_col is not None:
+
+        data["Open"] = pd.to_numeric(
+            raw[open_col],
+            errors="coerce"
+        )
+
+    else:
+
+        data["Open"] = data["Close"]
+
+    # High
+    if high_col is not None:
+
+        data["High"] = pd.to_numeric(
+            raw[high_col],
+            errors="coerce"
+        )
+
+    else:
+
+        data["High"] = data["Close"]
+
+    # Low
+    if low_col is not None:
+
+        data["Low"] = pd.to_numeric(
+            raw[low_col],
+            errors="coerce"
+        )
+
+    else:
+
+        data["Low"] = data["Close"]
+
+    # Volume
+    if volume_col is not None:
+
+        data["Volume"] = pd.to_numeric(
+            raw[volume_col],
+            errors="coerce"
+        )
+
+    else:
+
+        data["Volume"] = 0
+
+    # ========================================================
+    # CLEAN DATA
+    # ========================================================
+
+    data = data.dropna(
+        subset=[
+            "Date",
+            "Close"
+        ]
+    )
+
+    data = data.sort_values(
+        "Date"
+    )
+
+    data = data.drop_duplicates(
+        subset=["Date"],
+        keep="last"
+    )
+
+    data = data.set_index(
+        "Date"
+    )
+
+    # Remove invalid prices
+    data = data[
+        data["Close"] > 0
+    ]
+
+    # ========================================================
+    # APPLY PERIOD
+    # ========================================================
+
+    if period not in PERIOD_DAYS:
+        period = "5y"
+
+    days = PERIOD_DAYS[period]
+
+    if (
+        days is not None
+        and not data.empty
+    ):
+
+        latest_date = data.index.max()
+
+        start_date = (
+            latest_date
+            - pd.Timedelta(days=days)
+        )
+
+        filtered = data[
+            data.index >= start_date
+        ]
+
+        if not filtered.empty:
+            data = filtered
+
+    # ========================================================
+    # FINAL VALIDATION
+    # ========================================================
+
+    if data.empty:
+
+        raise ValueError(
+            f"No usable data available for {asset}."
+        )
+
+    return data
     # --------------------------------------------------------
     # Locate columns
     # --------------------------------------------------------
