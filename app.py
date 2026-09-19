@@ -314,6 +314,11 @@ def load_data(asset="nvidia", period="5y"):
 # ============================================================
 
 def add_indicators(data, fast=20, slow=50):
+# ============================================================
+# INDICATORS
+# ============================================================
+
+def add_indicators(data, fast=20, slow=50):
     """
     Add quantitative indicators required by the project.
     """
@@ -324,67 +329,102 @@ def add_indicators(data, fast=20, slow=50):
     if slow <= fast:
         slow = fast + 1
 
-    df = data.copy()
+    # Make an independent copy
+    df = data.copy(deep=True)
 
     close = df["Close"]
 
+    # --------------------------------------------------------
     # Moving averages
-    df["SMA Fast"] = close.rolling(
-        window=fast,
-        min_periods=fast
-    ).mean()
+    # --------------------------------------------------------
 
-    df["SMA Slow"] = close.rolling(
-        window=slow,
-        min_periods=slow
-    ).mean()
+    df.loc[:, "SMA Fast"] = (
+        close.rolling(
+            window=fast,
+            min_periods=fast
+        ).mean()
+    )
 
-    df["EMA Fast"] = close.ewm(
-        span=fast,
-        adjust=False
-    ).mean()
+    df.loc[:, "SMA Slow"] = (
+        close.rolling(
+            window=slow,
+            min_periods=slow
+        ).mean()
+    )
 
-    df["EMA Slow"] = close.ewm(
-        span=slow,
-        adjust=False
-    ).mean()
+    df.loc[:, "EMA Fast"] = (
+        close.ewm(
+            span=fast,
+            adjust=False
+        ).mean()
+    )
 
+    df.loc[:, "EMA Slow"] = (
+        close.ewm(
+            span=slow,
+            adjust=False
+        ).mean()
+    )
+
+    # --------------------------------------------------------
     # Daily returns
-    df["Daily Return"] = close.pct_change()
+    # --------------------------------------------------------
 
+    df.loc[:, "Daily Return"] = (
+        close.pct_change()
+    )
+
+    # --------------------------------------------------------
     # Cumulative returns
-    df["Cumulative Return"] = (
+    # --------------------------------------------------------
+
+    df.loc[:, "Cumulative Return"] = (
         1 + df["Daily Return"].fillna(0)
     ).cumprod() - 1
 
+    # --------------------------------------------------------
     # Rolling volatility
-    df["Rolling Volatility"] = (
+    # --------------------------------------------------------
+
+    df.loc[:, "Rolling Volatility"] = (
         df["Daily Return"]
-        .rolling(30)
+        .rolling(
+            window=30,
+            min_periods=30
+        )
         .std()
         * np.sqrt(252)
     )
 
-    # Rolling 30-day return
-    df["Rolling Return 30D"] = (
+    # --------------------------------------------------------
+    # Rolling returns
+    # --------------------------------------------------------
+
+    df.loc[:, "Rolling Return 30D"] = (
         close.pct_change(30)
     )
 
-    # Rolling 90-day return
-    df["Rolling Return 90D"] = (
+    df.loc[:, "Rolling Return 90D"] = (
         close.pct_change(90)
     )
 
+    # --------------------------------------------------------
     # Running maximum
-    df["Running Max"] = close.cummax()
+    # --------------------------------------------------------
 
-    # Asset drawdown
-    df["Drawdown"] = (
+    df.loc[:, "Running Max"] = (
+        close.cummax()
+    )
+
+    # --------------------------------------------------------
+    # Drawdown
+    # --------------------------------------------------------
+
+    df.loc[:, "Drawdown"] = (
         close / df["Running Max"] - 1
     )
 
     return df
-
 
 # ============================================================
 # PERFORMANCE METRICS
